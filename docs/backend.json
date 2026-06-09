@@ -1,0 +1,65 @@
+
+{
+  "entities": {
+    "Room": {
+      "title": "Room Ujian",
+      "description": "Menyimpan data ruangan ujian, password, dan daftar soal.",
+      "type": "object",
+      "properties": {
+        "password": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "questionText": { "type": "string" },
+              "options": { "type": "array", "items": { "type": "string" } },
+              "correctAnswerIndex": { "type": "number" }
+            }
+          }
+        }
+      },
+      "required": ["password", "questions"]
+    },
+    "Submission": {
+      "title": "Hasil Ujian Siswa",
+      "description": "Menyimpan hasil pengerjaan siswa di dalam room tertentu.",
+      "type": "object",
+      "properties": {
+        "studentName": { "type": "string" },
+        "score": { "type": "number" },
+        "totalQuestions": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "answers": { "type": "array", "items": { "type": "number" } }
+      },
+      "required": ["studentName", "score", "totalQuestions"]
+    },
+    "AdminConfig": {
+      "title": "Konfigurasi Admin",
+      "description": "Menyimpan pengaturan rahasia untuk panel operator.",
+      "type": "object",
+      "properties": {
+        "secret_code": { "type": "string", "description": "Kode PIN untuk masuk ke panel operator." }
+      }
+    }
+  },
+  "auth": {
+    "providers": ["anonymous"]
+  },
+  "firestore": {
+    "/rooms/{roomId}": {
+      "schema": "Room",
+      "description": "Data utama ruangan ujian."
+    },
+    "/rooms/{roomId}/submissions/{submissionId}": {
+      "schema": "Submission",
+      "description": "Koleksi hasil ujian siswa di dalam ruangan."
+    },
+    "/config/admin_settings": {
+      "schema": "AdminConfig",
+      "description": "Dokumen pusat pengaturan akses operator."
+    }
+  }
+}
