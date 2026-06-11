@@ -1,17 +1,17 @@
 # EduQuiz
 EduQuiz is a real-time, cloud-based interactive quiz and examination platform built using **Next.js** and **Firebase Realtime Database**. Designed for modern classrooms and online assessments, it enables teachers to effortlessly publish visually rich quizzes and allows students to participate securely with minimal setup.
-## 🚀 Features
+## Features
  * **Real-Time Synchronization:** Powered by Firebase Realtime Database to instantly sync quiz actions, session timers, and student submissions.
  * **Smart Image Encoding:** Incorporates a local Python automation script to compress and inject exam images directly into JSON schemas using Base64 data strings.
  * **Role-Based Access Control (RBAC):** Distinct dashboards and features tailored for **Admin**, **Teachers (Guru)**, and **Students (Siswa)**.
  * **Student Focus Security:** Includes an "Izin Toilet" (Temporary Leave) protocol that locks the student's viewport to maintain examination integrity.
  * **Optimized Mobile UX:** Implements pure CSS text-transform filters on critical fields like Room ID to bypass mobile predictive keyboard bugs (e.g., Gboard/iOS numeric layer bugs).
-## 🛠️ Tech Stack
+## Tech Stack
  * **Frontend Framework:** Next.js (React)
  * **Styling:** Tailwind CSS
  * **Database & Auth:** Firebase Realtime Database
  * **Data Processing:** Python 3 (Base64 & JSON utilities)
-## 📁 Project Directory Structure
+## Project Directory Structure
 ```text
 eduquiz/
 ├── app/                     # Next.js App Router
