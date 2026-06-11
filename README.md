@@ -25,15 +25,15 @@ eduquiz/
     └── converter.py         # Base64 image injector script
 
 ```
-## 📖 User Guide (How to Use)
-### 👨‍🎓 For Students (Peserta Ujian)
+## User Guide (How to Use)
+### For Students (Peserta Ujian)
  1. **Access the Portal:** Open your mobile or desktop browser and navigate to the official EduQuiz link provided by your teacher.
  2. **Enter Credentials:** Type your **Full Name** (use your official registration name) and the specific **Room ID** (e.g., AJGCZ2). Enter the password if required.
  3. **Wait in Lobby:** Click **"MASUK UJIAN"** to enter the live waiting lobby. Wait until your teacher officially starts the examination session.
  4. **Take the Quiz:** Answer the multiple-choice questions (A, B, C, D, or E) sequentially. If a question contains a diagram or chart, it will automatically load underneath the question text. Click **"SELANJUTNYA"** to lock your answer and proceed.
  5. **Temporary Leave:** Use the **"IZIN TOILET"** button if you need to step away. Your screen will be locked securely to prevent unauthorized access. Click **"SAYA SUDAH KEMBALI"** upon your return.
  6. **Submit:** On the final question, review your choices and click **"SELESAI UJIAN"** or **"SUBMIT"** to permanently upload your scores to the server.
-### 👨‍🏫 For Teachers / Admins (Pengelola Ujian)
+### For Teachers / Admins (Pengelola Ujian)
  1. **Generate the Packet:** Request your AI assistant (Claude) to generate a package of multiple-choice questions with dynamic image elements, and download the raw output as a .zip file.
  2. **Extract the Files:** Extract the downloaded .zip packet onto your computer. Ensure it contains the main soal.json file and all corresponding image assets (.jpg/.png).
  3. **Run the Media Converter:** * Copy the converter.exe (or converter.py) tool into the exact same folder where soal.json resides.
@@ -42,5 +42,5 @@ eduquiz/
  4. **Recompress the Package:** Select the updated soal.json, all image files, and the discussion keys (if available). **Do not** include the converter.exe tool to save file space. Compress them back into a clean .zip file (e.g., Final_Exam_Package.zip).
  5. **Upload & Publish:** Log into the EduQuiz Teacher/Admin dashboard, enter or generate your targeted **Room ID**, drag-and-drop your newly created .zip file into the upload zone, and click **"UPLOAD & PUBLISH"**.
  6. **Live Monitoring:** Share the active Room ID with your students and use the live admin dashboard to monitor user attendance, session clocks, and incoming grade metrics in real time.
-## 📄 License
+## License
 This software ecosystem is privately developed for academic and examination hosting optimization. All rights reserved.
