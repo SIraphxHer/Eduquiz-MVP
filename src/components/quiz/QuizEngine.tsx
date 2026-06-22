@@ -40,6 +40,10 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
   const { toast } = useToast();
   const certRef = useRef<HTMLDivElement>(null);
   
+  // Anti-Cheat Baseline Dimensions
+  const baseline = useRef({ w: 0, h: 0 });
+  const isInitialized = useRef(false);
+
   const [state, setState] = useState<'quiz' | 'summary'>('quiz');
   const [questions, setQuestions] = useState<any[]>([]);
   const [currentIdx, setCurrentIdx] = useState(0);
@@ -57,6 +61,14 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
 
   const finalRoomId = roomId.toUpperCase();
 
+  // 1. INITIAL WINDOW LOCK (Baseline Setup)
+  useEffect(() => {
+    if (typeof window !== 'undefined' && !isInitialized.current) {
+      baseline.current = { w: window.innerWidth, h: window.innerHeight };
+      isInitialized.current = true;
+    }
+  }, []);
+
   const fetchData = useCallback(async () => {
     if (!db || !finalRoomId) return;
     const snap = await get(ref(db, `rooms/${finalRoomId}`));
@@ -64,13 +76,18 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
       const data = snap.val();
       setRoomData(data);
       setIsExamMode(data.settings?.isExamMode ?? true);
-      const rawQs = Array.isArray(data.questions) ? data.questions : Object.values(data.questions || {});
-      const normalizedQs = rawQs.map((q: any) => ({
+      
+      // Normalisasi array questions dari Firebase (mencegah .map error)
+      const rawQs = data.questions || [];
+      const normalizedQs = Array.isArray(rawQs) ? rawQs : Object.values(rawQs);
+      
+      const processedQs = normalizedQs.map((q: any) => ({
         ...q,
         options: Array.isArray(q.options) ? q.options : Object.values(q.options || {})
       }));
-      setQuestions(normalizedQs);
-      if (answers.length === 0) setAnswers(new Array(normalizedQs.length).fill(null));
+      
+      setQuestions(processedQs);
+      if (answers.length === 0) setAnswers(new Array(processedQs.length).fill(null));
     }
   }, [db, finalRoomId, answers.length]);
 
@@ -85,8 +102,16 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
         fetchData();
       }
     });
-    return () => unsub();
-  }, [db, finalRoomId, fetchData]);
+    
+    // Remote Unlock Listener (Jika operator mereset status lock dari dashboard)
+    const subUnsub = onValue(ref(db, `rooms/${finalRoomId}/submissions/${submissionId}/isLocked`), (snap) => {
+      if (snap.val() === false) {
+        setIsCheatLocked(false);
+      }
+    });
+
+    return () => { unsub(); subUnsub(); };
+  }, [db, finalRoomId, submissionId, fetchData]);
 
   // TIMER LOGIC (WITH TOILET & CHEAT FREEZE)
   useEffect(() => {
@@ -104,33 +129,73 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
     return () => clearInterval(timer);
   }, [state, isToiletMode, isCheatLocked, timeLeft]);
 
-  // ANTI-CHEAT (TAB VISIBILITY)
+  // 2. ANTI-CHEAT LISTENERS (Resize, Visibility, Focus)
   useEffect(() => {
     if (state !== 'quiz' || isToiletMode || isCheatLocked || !isExamMode) return;
-    const handleVisibility = () => {
-      if (document.visibilityState === 'hidden') {
-        const newV = violations + 1;
-        setViolations(newV);
-        setIsCheatLocked(true);
-        if (db) {
-          dbUpdate(ref(db, `rooms/${finalRoomId}/submissions/${submissionId}`), { violations: newV });
-        }
-        toast({ 
-          variant: "destructive", 
-          title: "PELANGGARAN TERDETEKSI!", 
-          description: "Ujian Anda dikunci. Segera minta password pembuka ke operator." 
+
+    const lockUjian = (reason: string) => {
+      const newV = violations + 1;
+      setViolations(newV);
+      setIsCheatLocked(true);
+      
+      if (db) {
+        dbUpdate(ref(db, `rooms/${finalRoomId}/submissions/${submissionId}`), { 
+          violations: newV,
+          isLocked: true,
+          lastViolationReason: reason,
+          timestamp: Date.now()
         });
       }
+      
+      toast({ 
+        variant: "destructive", 
+        title: "PELANGGARAN TERDETEKSI!", 
+        description: reason 
+      });
     };
+
+    // 3. PAGE VISIBILITY & FOCUS DETECTOR
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        lockUjian("Pindah Tab / Keluar Aplikasi");
+      }
+    };
+
+    const handleBlur = () => {
+      // Menangkap Floating Windows, Panel Notifikasi, atau ganti App
+      lockUjian("Kehilangan Fokus (Jendela Mengambang / Notifikasi)");
+    };
+
+    // 4. SCREEN RESIZE DETECTOR (Anti-Split Screen)
+    const handleResize = () => {
+      const currentW = window.innerWidth;
+      const currentH = window.innerHeight;
+      
+      // Jika dimensi menyusut di bawah 75% dari dimensi awal
+      if (currentW < baseline.current.w * 0.75 || currentH < baseline.current.h * 0.75) {
+        lockUjian("Deteksi Split Screen / Pengurangan Ukuran Jendela");
+      }
+    };
+
     window.addEventListener('visibilitychange', handleVisibility);
-    return () => window.removeEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('blur', handleBlur);
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('blur', handleBlur);
+      window.removeEventListener('resize', handleResize);
+    };
   }, [state, isToiletMode, isCheatLocked, violations, db, finalRoomId, submissionId, isExamMode, toast]);
 
   const handleUnlock = () => {
-    const correctPass = roomData?.settings?.passwordPembuka || '';
+    const correctPass = roomData?.settings?.passwordPembuka || '123456';
     if (unlockPassword.trim().toUpperCase() === correctPass.trim().toUpperCase()) {
       setIsCheatLocked(false);
       setUnlockPassword('');
+      if (db) {
+        dbUpdate(ref(db, `rooms/${finalRoomId}/submissions/${submissionId}`), { isLocked: false });
+      }
       toast({ title: "Ujian Terbuka", description: "Lanjutkan pengerjaan dengan jujur!" });
     } else {
       toast({ variant: "destructive", title: "Password Salah!", description: "Minta password yang benar ke operator." });
@@ -209,7 +274,7 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
             <div className="p-4 bg-muted/30 rounded-2xl"><p className="text-xs font-bold uppercase">Salah</p><p className="text-3xl font-black">{results.total - results.score}</p></div>
             <div className="p-4 bg-primary text-primary-foreground rounded-2xl shadow-xl"><p className="text-xs font-bold uppercase opacity-70">Nilai</p><p className="text-3xl font-black">{results.percent}</p></div>
           </div>
-          <p className="text-sm font-bold text-muted-foreground uppercase tracking-widest">{quizTitle} • {new Date().toLocaleDateString('id-ID')}</p>
+          <p className="text-sm text-muted-foreground uppercase tracking-widest font-bold">Ujian: {quizTitle} • {new Date().toLocaleDateString('id-ID')}</p>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Button className="h-14 rounded-xl font-black text-lg bg-blue-700" onClick={downloadCertificate}><Download className="mr-2 h-5 w-5" /> UNDUH SERTIFIKAT JPG</Button>
@@ -230,21 +295,24 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
 
   return (
     <div className="container mx-auto p-4 max-w-4xl space-y-6 pb-20 select-none">
-      {/* OVERLAY CHEAT LOCK */}
+      {/* 5. UI ENFORCEMENT (HIGH PRIORITY OVERLAY) */}
       {isCheatLocked && (
-        <div className="fixed inset-0 z-[1000] bg-black/95 flex flex-col items-center justify-center p-8 text-center animate-in fade-in">
-          <ShieldAlert className="h-20 w-20 text-destructive animate-bounce mb-6" />
-          <h2 className="text-4xl font-black text-white mb-2 uppercase">UJIAN TERKUNCI!</h2>
-          <p className="text-muted-foreground text-lg mb-10 max-w-md">Anda terdeteksi melakukan pelanggaran (pindah tab/blur). Minta password pembuka ke operator untuk melanjutkan.</p>
+        <div className="fixed inset-0 z-[1000] bg-red-700 flex flex-col items-center justify-center p-8 text-center animate-in fade-in">
+          <ShieldAlert className="h-24 w-24 text-white animate-bounce mb-6" />
+          <h2 className="text-5xl font-black text-white mb-4 uppercase">UJIAN KAMU TERKUNCI!</h2>
+          <p className="text-red-100 text-xl mb-10 max-w-2xl font-medium">
+            Sistem mendeteksi upaya pelanggaran (Pindah Tab, Split Screen, atau Jendela Mengambang). 
+            Timer ujian dihentikan. Masukkan password dari operator untuk melanjutkan.
+          </p>
           <div className="w-full max-w-sm space-y-4">
             <Input 
-              placeholder="Masukkan Password Pembuka" 
-              className="h-14 text-center text-xl font-black uppercase" 
+              placeholder="MASUKKAN PASSWORD PEMBUKA" 
+              className="h-16 text-center text-2xl font-black uppercase border-4 border-white bg-white/20 text-white placeholder:text-white/50" 
               value={unlockPassword}
               onChange={e => setUnlockPassword(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && handleUnlock()}
             />
-            <Button className="w-full h-14 text-lg font-black bg-destructive" onClick={handleUnlock}>BUKA KUNCI</Button>
+            <Button className="w-full h-16 text-xl font-black bg-white text-red-700 hover:bg-red-50" onClick={handleUnlock}>BUKA KUNCI SEKARANG</Button>
           </div>
         </div>
       )}
