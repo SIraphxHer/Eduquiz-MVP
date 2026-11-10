@@ -1,0 +1,74 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "admins": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid"
+      }
+    },
+
+    "roomIndex": {
+      ".read": "auth != null && root.child('admins').child(auth.uid).val() === true",
+      ".write": "auth != null && root.child('admins').child(auth.uid).val() === true"
+    },
+
+    "roomAssets": {
+      ".write": "auth != null && root.child('admins').child(auth.uid).val() === true",
+      "$r": {
+        ".read": "auth != null && (root.child('admins').child(auth.uid).val() === true || root.child('rooms').child($r).child('members').child(auth.uid).exists())"
+      }
+    },
+
+    "pembahasan_soal": {
+      ".read": "auth != null",
+      ".write": "auth != null && root.child('admins').child(auth.uid).val() === true"
+    },
+
+    "rooms": {
+      ".read": "auth != null && root.child('admins').child(auth.uid).val() === true",
+      ".write": "auth != null && root.child('admins').child(auth.uid).val() === true",
+
+      "$r": {
+        "meta": {
+          ".read": "auth != null && root.child('rooms').child($r).child('members').child(auth.uid).exists()"
+        },
+
+        "questions": {
+          ".read": "auth != null && root.child('rooms').child($r).child('members').child(auth.uid).exists()"
+        },
+
+        "review": {
+          "pdf": {
+            ".read": "auth != null && root.child('rooms').child($r).child('members').child(auth.uid).exists() && root.child('rooms').child($r).child('meta').child('settings').child('isExamMode').val() === false"
+          }
+        },
+
+        "members": {
+          "$u": {
+            ".read": "auth != null && auth.uid === $u",
+            ".write": "auth != null && auth.uid === $u && newData.exists() && newData.child('pw').val() === root.child('rooms').child($r).child('secret').child('password').val()",
+            ".validate": "newData.hasChildren(['name', 'pw'])",
+            "name": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 80" },
+            "pw": { ".validate": "newData.isString()" },
+            "$other": { ".validate": false }
+          }
+        },
+
+        "submissions": {
+          "$u": {
+            ".read": "auth != null && auth.uid === $u",
+            ".write": "auth != null && auth.uid === $u && root.child('rooms').child($r).child('members').child($u).exists() && data.child('isFinished').val() !== true",
+            "isLocked": {
+              ".validate": "newData.val() === true || root.child('admins').child(auth.uid).val() === true"
+            },
+            "score": {
+              ".validate": "root.child('admins').child(auth.uid).val() === true"
+            }
+          }
+        }
+      }
+    }
+  }
+}

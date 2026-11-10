@@ -1,19 +1,31 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { useDatabase } from '@/firebase';
-import { ref, get, update, onValue } from 'firebase/database';
+import { useAuth, useDatabase } from '@/firebase';
+import { ref, get, set, update, onValue } from 'firebase/database';
+import { signInAnonymously } from 'firebase/auth';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Loader2, LogIn, AlertCircle, Eye, EyeOff, Clock } from 'lucide-react';
+import { Loader2, LogIn, Eye, EyeOff, Clock, Lock } from 'lucide-react';
 import { useToast } from "@/hooks/use-toast";
 import Link from 'next/link';
-import { QuizEngine } from '@/components/quiz/QuizEngine';
+import { QuizEngine, type QuizResume } from '@/components/quiz/QuizEngine';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
+import { normalizeAnswers } from '@/lib/asset-key';
+
+interface QuizSession {
+  roomId: string;
+  quizTitle: string;
+  duration: number;
+  studentName: string;
+  uid: string;
+  resume?: QuizResume;
+}
 
 export default function StudentLoginPage() {
+  const auth = useAuth();
   const db = useDatabase();
   const { toast } = useToast();
   const [roomId, setRoomId] = useState('');
@@ -21,73 +33,129 @@ export default function StudentLoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [studentName, setStudentName] = useState('');
   const [loading, setLoading] = useState(false);
-  const [quizData, setQuizData] = useState<any>(null);
+  const [session, setSession] = useState<QuizSession | null>(null);
   const [roomStatus, setRoomStatus] = useState<'idle' | 'started' | 'closed'>('idle');
-  const [submissionId, setSubmissionId] = useState<string | null>(null);
+  const [engineActive, setEngineActive] = useState(false);
 
+  // Status room (ruang tunggu -> ujian dimulai)
   useEffect(() => {
-    if (!db || !quizData?.roomId) return;
-    const unsub = onValue(ref(db, `rooms/${quizData.roomId}/status`), (snap) => {
+    if (!db || !session) return;
+    const unsub = onValue(ref(db, `rooms/${session.roomId}/meta/status`), (snap) => {
       setRoomStatus(snap.val() || 'idle');
     });
     return () => unsub();
-  }, [db, quizData]);
+  }, [db, session]);
+
+  // Begitu ujian dimulai, mesin kuis tetap tampil walaupun operator menutup ujian di tengah jalan
+  useEffect(() => {
+    if (session && roomStatus === 'started') setEngineActive(true);
+  }, [session, roomStatus]);
 
   const joinRoom = async () => {
     const finalRoomId = roomId.toString().toUpperCase().trim();
     const inputPass = password.trim();
     const name = studentName.trim();
 
-    if (!db || !finalRoomId || !inputPass || !name) {
+    if (!db || !auth || !finalRoomId || !inputPass || !name) {
       return toast({ variant: "destructive", title: "Lengkapi Data" });
     }
-    
+
     setLoading(true);
     try {
-      const snap = await get(ref(db, `rooms/${finalRoomId}`));
-      if (!snap.exists()) throw new Error("ID Room tidak ditemukan.");
-      
-      const data = snap.val();
-      const dbPass = data.password ? data.password.toString().trim() : '';
-      
-      if (dbPass !== inputPass) throw new Error("Password ruangan salah.");
-      if (!data.questions) throw new Error("Paket soal belum diupload oleh operator.");
+      await auth.authStateReady();
+      const user = auth.currentUser ?? (await signInAnonymously(auth)).user;
+      const uid = user.uid;
 
-      const subId = `${name.replace(/\s+/g, '_')}_${Date.now()}`;
-      setSubmissionId(subId);
-      
-      await update(ref(db, `rooms/${finalRoomId}/submissions/${subId}`), {
-        studentName: name, 
-        currentIdx: 0, 
-        isFinished: false, 
-        timestamp: Date.now(),
-        violations: 0,
-        totalQuestions: Array.isArray(data.questions) ? data.questions.length : 0
+      // Bukti tahu password: Rules membandingkan dengan password di server, password tidak pernah dikirim ke klien.
+      try {
+        await set(ref(db, `rooms/${finalRoomId}/members/${uid}`), { name, pw: inputPass });
+      } catch {
+        throw new Error("Room ID atau password salah, atau soal belum diupload operator.");
+      }
+
+      const metaSnap = await get(ref(db, `rooms/${finalRoomId}/meta`));
+      if (!metaSnap.exists()) throw new Error("Paket soal belum diupload oleh operator.");
+      const meta = metaSnap.val();
+      const total = Number(meta.totalQuestions) || 0;
+
+      const subRef = ref(db, `rooms/${finalRoomId}/submissions/${uid}`);
+      const subSnap = await get(subRef);
+      let resume: QuizResume | undefined;
+
+      if (subSnap.exists()) {
+        const s = subSnap.val();
+        if (s.isFinished) throw new Error("Kamu sudah menyelesaikan ujian ini.");
+        resume = {
+          answers: normalizeAnswers(s.answers, total),
+          currentIdx: typeof s.currentIdx === 'number' ? s.currentIdx : 0,
+          timeLeft: typeof s.timeLeft === 'number' ? s.timeLeft : undefined,
+          violations: typeof s.violations === 'number' ? s.violations : 0,
+          isLocked: s.isLocked === true,
+        };
+        await update(subRef, { studentName: name, timestamp: Date.now() });
+      } else {
+        await update(subRef, {
+          studentName: name,
+          currentIdx: 0,
+          isFinished: false,
+          timestamp: Date.now(),
+          violations: 0,
+          totalQuestions: total,
+        });
+      }
+
+      setRoomStatus(meta.status || 'idle');
+      setSession({
+        roomId: finalRoomId,
+        quizTitle: meta.quizTitle,
+        duration: meta.duration || 60,
+        studentName: name,
+        uid,
+        resume,
       });
 
-      setRoomStatus(data.status || 'idle');
-      setQuizData({ 
-        roomId: finalRoomId, 
-        quizTitle: data.quizTitle,
-        questions: data.questions,
-        duration: data.duration || 60,
-        studentName: name 
-      });
-      
-      toast({ title: "Berhasil Bergabung" });
+      toast({ title: resume ? "Berhasil Bergabung Kembali" : "Berhasil Bergabung" });
     } catch (e: any) {
       toast({ variant: "destructive", title: "Gagal", description: e.message });
     } finally { setLoading(false); }
   };
 
-  if (quizData && roomStatus !== 'started') {
+  if (session && engineActive) {
+    return (
+      <QuizEngine
+        roomId={session.roomId}
+        quizTitle={session.quizTitle}
+        submissionId={session.uid}
+        studentName={session.studentName}
+        durationMinutes={session.duration}
+        resume={session.resume}
+      />
+    );
+  }
+
+  if (session && roomStatus === 'closed') {
+    return (
+      <div className="min-h-screen bg-background flex flex-col items-center justify-center p-6 text-center">
+        <Card className="max-w-md w-full shadow-2xl border-t-8 border-primary p-8 space-y-6">
+          <Lock className="h-16 w-16 text-primary mx-auto" />
+          <CardTitle className="text-2xl font-black">UJIAN DITUTUP</CardTitle>
+          <CardDescription className="text-lg">
+            Sesi <strong>{session.quizTitle}</strong> sudah ditutup oleh operator.
+          </CardDescription>
+          <Button variant="outline" className="w-full" onClick={() => window.location.reload()}>Keluar</Button>
+        </Card>
+      </div>
+    );
+  }
+
+  if (session) {
     return (
       <div className="min-h-screen bg-background flex flex-col items-center justify-center p-6 text-center">
         <Card className="max-w-md w-full shadow-2xl border-t-8 border-primary p-8 space-y-6">
           <Clock className="h-16 w-16 text-primary animate-pulse mx-auto" />
           <CardTitle className="text-2xl font-black">RUANG TUNGGU</CardTitle>
           <CardDescription className="text-lg">
-            Sesi <strong>{quizData.quizTitle}</strong> sedang dipersiapkan. <br />
+            Sesi <strong>{session.quizTitle}</strong> sedang dipersiapkan. <br />
             Menunggu operator memulai ujian...
           </CardDescription>
           <div className="flex justify-center py-4">
@@ -96,18 +164,6 @@ export default function StudentLoginPage() {
           <Button variant="outline" className="w-full" onClick={() => window.location.reload()}>Keluar</Button>
         </Card>
       </div>
-    );
-  }
-
-  if (quizData && roomStatus === 'started') {
-    return (
-      <QuizEngine 
-        roomId={quizData.roomId} 
-        quizTitle={quizData.quizTitle}
-        submissionId={submissionId || ''}
-        studentName={quizData.studentName}
-        durationMinutes={quizData.duration}
-      />
     );
   }
 
