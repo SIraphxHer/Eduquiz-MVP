@@ -3,18 +3,17 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useDatabase } from '@/firebase';
 import { ref, update as dbUpdate, onValue, get } from 'firebase/database';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Card, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
-import { 
+import {
   ChevronRight, Loader2, User, ChevronLeft, HelpCircle,
   Download, FileText, Globe, Clock, Lock, ShieldAlert
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from "@/hooks/use-toast";
 import html2canvas from 'html2canvas';
-import { Input } from "@/components/ui/input";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -27,39 +26,62 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 
+export interface QuizResume {
+  answers: (number | null)[];
+  currentIdx: number;
+  timeLeft?: number;
+  violations: number;
+  isLocked: boolean;
+}
+
 interface QuizEngineProps {
   roomId: string;
   submissionId: string;
   studentName: string;
   durationMinutes: number;
   quizTitle: string;
+  resume?: QuizResume;
 }
 
-export function QuizEngine({ roomId, submissionId, studentName, durationMinutes, quizTitle }: QuizEngineProps) {
+export function QuizEngine({ roomId, submissionId, studentName, durationMinutes, quizTitle, resume }: QuizEngineProps) {
   const db = useDatabase();
   const { toast } = useToast();
   const certRef = useRef<HTMLDivElement>(null);
-  
+
+  const finalRoomId = roomId.toUpperCase();
+  const subPath = `rooms/${finalRoomId}/submissions/${submissionId}`;
+
   // Anti-Cheat Baseline Dimensions
   const baseline = useRef({ w: 0, h: 0 });
   const isInitialized = useRef(false);
 
   const [state, setState] = useState<'quiz' | 'summary'>('quiz');
   const [questions, setQuestions] = useState<any[]>([]);
-  const [currentIdx, setCurrentIdx] = useState(0);
-  const [answers, setAnswers] = useState<(number | null)[]>([]);
+  const [isLoadingQs, setIsLoadingQs] = useState(true);
+  const [currentIdx, setCurrentIdx] = useState(resume?.currentIdx ?? 0);
+  const [answers, setAnswers] = useState<(number | null)[]>(resume?.answers ?? []);
   const [flagged, setFlagged] = useState<Record<number, boolean>>({});
-  const [timeLeft, setTimeLeft] = useState(durationMinutes * 60);
+  const [timeLeft, setTimeLeft] = useState(resume?.timeLeft ?? durationMinutes * 60);
   const [isToiletMode, setIsToiletMode] = useState(false);
-  const [isCheatLocked, setIsCheatLocked] = useState(false);
-  const [unlockPassword, setUnlockPassword] = useState('');
-  const [results, setResults] = useState<any>(null);
-  const [violations, setViolations] = useState(0);
-  
-  const [roomData, setRoomData] = useState<any>(null);
+  const [isCheatLocked, setIsCheatLocked] = useState(resume?.isLocked ?? false);
+  const [serverScore, setServerScore] = useState<number | null>(null);
+  const [submitFailed, setSubmitFailed] = useState(false);
   const [isExamMode, setIsExamMode] = useState(true);
+  const [hasPdf, setHasPdf] = useState(false);
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
+  // key gambar -> dataURL ('' = tidak tersedia, undefined = belum dimuat)
+  const [images, setImages] = useState<Record<string, string>>({});
 
-  const finalRoomId = roomId.toUpperCase();
+  const answersRef = useRef<(number | null)[]>(resume?.answers ?? []);
+  const timeLeftRef = useRef(timeLeft);
+  const violationsRef = useRef(resume?.violations ?? 0);
+  const lockedRef = useRef(resume?.isLocked ?? false);
+  const finishedRef = useRef(false);
+
+  const currentSoal = questions[currentIdx];
+  const currentImageKey: string | undefined = currentSoal?.imageKey;
+
+  useEffect(() => { timeLeftRef.current = timeLeft; }, [timeLeft]);
 
   // 1. INITIAL WINDOW LOCK (Baseline Setup)
   useEffect(() => {
@@ -69,88 +91,140 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
     }
   }, []);
 
-  const fetchData = useCallback(async () => {
-    if (!db || !finalRoomId) return;
-    const snap = await get(ref(db, `rooms/${finalRoomId}`));
-    if (snap.exists()) {
-      const data = snap.val();
-      setRoomData(data);
-      setIsExamMode(data.settings?.isExamMode ?? true);
-      
-      // Normalisasi array questions dari Firebase (mencegah .map error)
-      const rawQs = data.questions || [];
-      const normalizedQs = Array.isArray(rawQs) ? rawQs : Object.values(rawQs);
-      
-      const processedQs = normalizedQs.map((q: any) => ({
-        ...q,
-        options: Array.isArray(q.options) ? q.options : Object.values(q.options || {})
-      }));
-      
-      setQuestions(processedQs);
-      if (answers.length === 0) setAnswers(new Array(processedQs.length).fill(null));
-    }
-  }, [db, finalRoomId, answers.length]);
-
-  // SINKRONISASI REALTIME & REFRESH TRIGGER
+  // Soal dimuat SEKALI (tanpa kunci jawaban, tanpa data siswa lain)
   useEffect(() => {
-    if (!db || !finalRoomId) return;
-    const unsub = onValue(ref(db, `rooms/${finalRoomId}`), (snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        setRoomData(data);
-        setIsExamMode(data.settings?.isExamMode ?? true);
-        fetchData();
+    if (!db) return;
+    let cancelled = false;
+    get(ref(db, `rooms/${finalRoomId}/questions`))
+      .then(snap => {
+        if (cancelled) return;
+        const raw = snap.val() || [];
+        const arr: any[] = Array.isArray(raw) ? raw : Object.values(raw);
+        const processed = arr.map((q: any) => ({
+          ...q,
+          options: Array.isArray(q.options) ? q.options : Object.values(q.options || {}),
+        }));
+        setQuestions(processed);
+        setAnswers(prev => {
+          const next = processed.map((_, i) => prev[i] ?? null);
+          answersRef.current = next;
+          return next;
+        });
+        setIsLoadingQs(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setIsLoadingQs(false);
+        toast({ variant: "destructive", title: "Gagal memuat soal", description: "Muat ulang halaman lalu masuk kembali." });
+      });
+    return () => { cancelled = true; };
+  }, [db, finalRoomId, toast]);
+
+  // Pengaturan room (hanya meta, bukan seluruh room)
+  useEffect(() => {
+    if (!db) return;
+    const unsub = onValue(ref(db, `rooms/${finalRoomId}/meta`), (snap) => {
+      const m = snap.val();
+      if (m) {
+        setIsExamMode(m.settings?.isExamMode ?? true);
+        setHasPdf(!!m.hasPdf);
       }
     });
-    
-    // Remote Unlock Listener (Jika operator mereset status lock dari dashboard)
-    const subUnsub = onValue(ref(db, `rooms/${finalRoomId}/submissions/${submissionId}/isLocked`), (snap) => {
-      if (snap.val() === false) {
+    return () => unsub();
+  }, [db, finalRoomId]);
+
+  // Submission milik sendiri: buka-kunci dari operator + skor dari operator
+  useEffect(() => {
+    if (!db) return;
+    const unsub = onValue(ref(db, subPath), (snap) => {
+      const v = snap.val();
+      if (!v) return;
+      if (v.isLocked === false) {
+        lockedRef.current = false;
         setIsCheatLocked(false);
       }
+      if (typeof v.score === 'number') setServerScore(v.score);
     });
+    return () => unsub();
+  }, [db, subPath]);
 
-    return () => { unsub(); subUnsub(); };
-  }, [db, finalRoomId, submissionId, fetchData]);
+  // Gambar soal dimuat per soal (on-demand)
+  useEffect(() => {
+    if (!db || !currentImageKey || images[currentImageKey] !== undefined) return;
+    let cancelled = false;
+    get(ref(db, `roomAssets/${finalRoomId}/${currentImageKey}`))
+      .then(snap => {
+        if (cancelled) return;
+        setImages(prev => ({ ...prev, [currentImageKey]: snap.exists() ? String(snap.val()) : '' }));
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [db, finalRoomId, currentImageKey, images]);
+
+  // Kirim jawaban final. Skor dihitung operator (kunci jawaban tidak ada di browser siswa).
+  const finish = useCallback(() => {
+    if (finishedRef.current) return;
+    finishedRef.current = true;
+    setState('summary');
+    setSubmitFailed(false);
+    if (!db) return;
+    dbUpdate(ref(db, subPath), {
+      answers: answersRef.current.map(a => (a === null ? -1 : a)),
+      isFinished: true,
+      status: 'Selesai',
+      timeLeft: timeLeftRef.current,
+      timestamp: Date.now(),
+    }).catch(() => {
+      finishedRef.current = false;
+      setSubmitFailed(true);
+    });
+  }, [db, subPath]);
 
   // TIMER LOGIC (WITH TOILET & CHEAT FREEZE)
   useEffect(() => {
-    if (state !== 'quiz' || timeLeft <= 0 || isToiletMode || isCheatLocked) return;
-    const timer = setInterval(() => {
-      setTimeLeft(prev => {
-        if (prev <= 1) {
-          clearInterval(timer);
-          handleSelesaikan();
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
+    if (state !== 'quiz' || isLoadingQs || isToiletMode || isCheatLocked) return;
+    const timer = setInterval(() => setTimeLeft(prev => Math.max(0, prev - 1)), 1000);
     return () => clearInterval(timer);
-  }, [state, isToiletMode, isCheatLocked, timeLeft]);
+  }, [state, isLoadingQs, isToiletMode, isCheatLocked]);
+
+  useEffect(() => {
+    if (state === 'quiz' && !isLoadingQs && timeLeft <= 0) finish();
+  }, [state, isLoadingQs, timeLeft, finish]);
+
+  // Simpan sisa waktu berkala supaya refresh tidak mengembalikan waktu penuh
+  useEffect(() => {
+    if (!db || state !== 'quiz' || isLoadingQs) return;
+    const t = setInterval(() => {
+      dbUpdate(ref(db, subPath), { timeLeft: timeLeftRef.current }).catch(() => {});
+    }, 30000);
+    return () => clearInterval(t);
+  }, [db, subPath, state, isLoadingQs]);
 
   // 2. ANTI-CHEAT LISTENERS (Resize, Visibility, Focus)
   useEffect(() => {
-    if (state !== 'quiz' || isToiletMode || isCheatLocked || !isExamMode) return;
+    if (state !== 'quiz' || isLoadingQs || isToiletMode || isCheatLocked || !isExamMode) return;
 
     const lockUjian = (reason: string) => {
-      const newV = violations + 1;
-      setViolations(newV);
+      if (lockedRef.current) return;
+      lockedRef.current = true;
+      const newV = violationsRef.current + 1;
+      violationsRef.current = newV;
       setIsCheatLocked(true);
-      
+
       if (db) {
-        dbUpdate(ref(db, `rooms/${finalRoomId}/submissions/${submissionId}`), { 
+        dbUpdate(ref(db, subPath), {
           violations: newV,
           isLocked: true,
           lastViolationReason: reason,
+          timeLeft: timeLeftRef.current,
           timestamp: Date.now()
-        });
+        }).catch(() => {});
       }
-      
-      toast({ 
-        variant: "destructive", 
-        title: "PELANGGARAN TERDETEKSI!", 
-        description: reason 
+
+      toast({
+        variant: "destructive",
+        title: "PELANGGARAN TERDETEKSI!",
+        description: reason
       });
     };
 
@@ -170,7 +244,7 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
     const handleResize = () => {
       const currentW = window.innerWidth;
       const currentH = window.innerHeight;
-      
+
       // Jika dimensi menyusut di bawah 75% dari dimensi awal
       if (currentW < baseline.current.w * 0.75 || currentH < baseline.current.h * 0.75) {
         lockUjian("Deteksi Split Screen / Pengurangan Ukuran Jendela");
@@ -186,61 +260,43 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
       window.removeEventListener('blur', handleBlur);
       window.removeEventListener('resize', handleResize);
     };
-  }, [state, isToiletMode, isCheatLocked, violations, db, finalRoomId, submissionId, isExamMode, toast]);
-
-  const handleUnlock = () => {
-    const correctPass = roomData?.settings?.passwordPembuka || '123456';
-    if (unlockPassword.trim().toUpperCase() === correctPass.trim().toUpperCase()) {
-      setIsCheatLocked(false);
-      setUnlockPassword('');
-      if (db) {
-        dbUpdate(ref(db, `rooms/${finalRoomId}/submissions/${submissionId}`), { isLocked: false });
-      }
-      toast({ title: "Ujian Terbuka", description: "Lanjutkan pengerjaan dengan jujur!" });
-    } else {
-      toast({ variant: "destructive", title: "Password Salah!", description: "Minta password yang benar ke operator." });
-    }
-  };
+  }, [state, isLoadingQs, isToiletMode, isCheatLocked, isExamMode, db, subPath, toast]);
 
   const handleSelectOption = (idx: number) => {
     const newA = [...answers];
     newA[currentIdx] = idx;
+    answersRef.current = newA;
     setAnswers(newA);
     if (db) {
-      dbUpdate(ref(db, `rooms/${finalRoomId}/submissions/${submissionId}`), {
+      dbUpdate(ref(db, subPath), {
         [`answers/${currentIdx}`]: idx,
         currentIdx: currentIdx,
+        timeLeft: timeLeftRef.current,
         timestamp: Date.now()
-      });
+      }).catch(() => {});
     }
   };
 
-  const handleSelesaikan = () => {
-    let score = 0;
-    questions.forEach((q, i) => {
-      const correct = q.correctAnswerIndex ?? 0;
-      if (answers[i] === correct) score++;
-    });
-    const res = { score, total: questions.length, percent: Math.round((score / (questions.length || 1)) * 100) };
-    setResults(res);
-    setState('summary');
-    if (db) {
-      dbUpdate(ref(db, `rooms/${finalRoomId}/submissions/${submissionId}`), {
-        score: res.score,
-        isFinished: true,
-        status: 'Selesai'
-      });
+  const downloadPDFPembahasan = async () => {
+    if (!db) return;
+    setIsDownloadingPdf(true);
+    try {
+      const snap = await get(ref(db, `rooms/${finalRoomId}/review/pdf`));
+      if (!snap.exists()) {
+        toast({ variant: "destructive", title: "PDF belum siap!" });
+        return;
+      }
+      const link = document.createElement('a');
+      link.href = String(snap.val());
+      link.download = `Pembahasan_${quizTitle.replace(/\s+/g, '_')}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch {
+      toast({ variant: "destructive", title: "Pembahasan belum dibuka", description: "Minta operator mematikan Mode Anti-Cheat." });
+    } finally {
+      setIsDownloadingPdf(false);
     }
-  };
-
-  const downloadPDFPembahasan = () => {
-    if (!roomData?.pdf_pembahasan_base64) return toast({ variant: "destructive", title: "PDF belum siap!" });
-    const link = document.createElement('a');
-    link.href = roomData.pdf_pembahasan_base64;
-    link.download = `Pembahasan_${quizTitle.replace(/\s+/g, '_')}.pdf`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
   };
 
   const downloadCertificate = async () => {
@@ -260,7 +316,35 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
-  if (state === 'summary' && results) {
+  const results = serverScore !== null
+    ? {
+        score: serverScore,
+        total: questions.length,
+        percent: Math.round((serverScore / (questions.length || 1)) * 100),
+      }
+    : null;
+
+  if (state === 'summary') {
+    if (!results) {
+      return (
+        <div className="container mx-auto p-4 max-w-xl py-24">
+          <Card className="p-10 text-center space-y-4 shadow-2xl border-t-8 border-primary rounded-3xl">
+            <Loader2 className="h-12 w-12 animate-spin text-primary mx-auto" />
+            <CardTitle className="text-2xl font-black uppercase">Jawaban Terkirim</CardTitle>
+            <p className="text-muted-foreground">
+              Nilai sedang dihitung oleh operator. Jangan tutup halaman ini.
+            </p>
+            {submitFailed && (
+              <div className="space-y-3">
+                <p className="text-destructive font-bold">Pengiriman jawaban gagal.</p>
+                <Button onClick={finish} className="font-black">Kirim Ulang</Button>
+              </div>
+            )}
+          </Card>
+        </div>
+      );
+    }
+
     return (
       <div className="container mx-auto p-4 max-w-3xl py-12 space-y-8 animate-in fade-in duration-700">
         <div ref={certRef} className="bg-white p-12 border-[12px] border-primary rounded-3xl text-center shadow-2xl text-black relative">
@@ -278,7 +362,7 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Button className="h-14 rounded-xl font-black text-lg bg-blue-700" onClick={downloadCertificate}><Download className="mr-2 h-5 w-5" /> UNDUH SERTIFIKAT JPG</Button>
-          <Button variant="secondary" className="h-14 rounded-xl font-black text-lg" disabled={isExamMode || !roomData?.pdf_pembahasan_base64} onClick={downloadPDFPembahasan}>
+          <Button variant="secondary" className="h-14 rounded-xl font-black text-lg" disabled={isExamMode || !hasPdf || isDownloadingPdf} onClick={downloadPDFPembahasan}>
             {isExamMode ? <Lock className="mr-2 h-5 w-5" /> : <FileText className="mr-2 h-5 w-5" />}
             {isExamMode ? "PEMBAHASAN DIKUNCI" : "UNDUH PEMBAHASAN PDF"}
           </Button>
@@ -289,9 +373,18 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
     );
   }
 
-  const currentSoal = questions[currentIdx];
+  if (isLoadingQs) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center gap-4 text-muted-foreground">
+        <Loader2 className="h-10 w-10 animate-spin text-primary" />
+        <p className="font-bold">Memuat soal...</p>
+      </div>
+    );
+  }
+
   const prog = questions.length > 0 ? ((currentIdx + 1) / questions.length) * 100 : 0;
   const unansweredCount = answers.filter(a => a === null).length;
+  const currentImage = currentImageKey ? images[currentImageKey] : undefined;
 
   return (
     <div className="container mx-auto p-4 max-w-4xl space-y-6 pb-20 select-none">
@@ -301,19 +394,10 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
           <ShieldAlert className="h-24 w-24 text-white animate-bounce mb-6" />
           <h2 className="text-5xl font-black text-white mb-4 uppercase">UJIAN KAMU TERKUNCI!</h2>
           <p className="text-red-100 text-xl mb-10 max-w-2xl font-medium">
-            Sistem mendeteksi upaya pelanggaran (Pindah Tab, Split Screen, atau Jendela Mengambang). 
-            Timer ujian dihentikan. Masukkan password dari operator untuk melanjutkan.
+            Sistem mendeteksi upaya pelanggaran (Pindah Tab, Split Screen, atau Jendela Mengambang).
+            Timer ujian dihentikan. Panggil operator untuk membuka kunci dari dashboard.
           </p>
-          <div className="w-full max-w-sm space-y-4">
-            <Input 
-              placeholder="MASUKKAN PASSWORD PEMBUKA" 
-              className="h-16 text-center text-2xl font-black uppercase border-4 border-white bg-white/20 text-white placeholder:text-white/50" 
-              value={unlockPassword}
-              onChange={e => setUnlockPassword(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleUnlock()}
-            />
-            <Button className="w-full h-16 text-xl font-black bg-white text-red-700 hover:bg-red-50" onClick={handleUnlock}>BUKA KUNCI SEKARANG</Button>
-          </div>
+          <Loader2 className="h-8 w-8 animate-spin text-white/80" />
         </div>
       )}
 
@@ -356,12 +440,18 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
       <Progress value={prog} className="h-3 rounded-full" />
 
       <Card className="p-8 shadow-2xl border-t-8 border-primary rounded-3xl bg-card">
-        {currentSoal?.image_base64 && (
+        {currentImageKey && (
           <div className="mb-6 bg-muted/20 p-4 rounded-2xl flex justify-center border-2 border-dashed">
-            <img src={currentSoal.image_base64} alt="Visual" className="max-h-[350px] w-auto rounded-lg shadow-lg" />
+            {currentImage ? (
+              <img src={currentImage} alt="Visual" className="max-h-[350px] w-auto rounded-lg shadow-lg" />
+            ) : currentImage === undefined ? (
+              <div className="flex items-center gap-2 text-muted-foreground text-sm py-10"><Loader2 className="h-4 w-4 animate-spin" /> Memuat gambar...</div>
+            ) : (
+              <div className="text-muted-foreground text-sm py-10">Gambar tidak tersedia.</div>
+            )}
           </div>
         )}
-        <h2 className="text-2xl font-bold leading-tight text-center whitespace-pre-wrap">{currentSoal?.soal || currentSoal?.questionText}</h2>
+        <h2 className="text-2xl font-bold leading-tight text-center whitespace-pre-wrap">{currentSoal?.questionText || currentSoal?.soal}</h2>
       </Card>
 
       <div className="grid gap-3">
@@ -391,10 +481,10 @@ export function QuizEngine({ roomId, submissionId, studentName, durationMinutes,
                   <AlertDialogDescription className="text-lg">
                     {unansweredCount > 0 ? (
                       <span className="text-destructive font-bold">Waduh coeg, masih ada {unansweredCount} soal yang belum dijawab! Yakin ingin submit sekarang?</span>
-                    ) : "Sistem akan mencatat nilai Anda. Pastikan semua soal telah diperiksa."}
+                    ) : "Sistem akan mencatat jawaban Anda. Pastikan semua soal telah diperiksa."}
                   </AlertDialogDescription>
                 </AlertDialogHeader>
-                <AlertDialogFooter><AlertDialogCancel className="font-bold">Batal</AlertDialogCancel><AlertDialogAction onClick={handleSelesaikan} className="bg-green-600 font-bold">Ya, Kirim</AlertDialogAction></AlertDialogFooter>
+                <AlertDialogFooter><AlertDialogCancel className="font-bold">Batal</AlertDialogCancel><AlertDialogAction onClick={finish} className="bg-green-600 font-bold">Ya, Kirim</AlertDialogAction></AlertDialogFooter>
               </AlertDialogContent>
             </AlertDialog>
           ) : <Button onClick={() => setCurrentIdx(p => p + 1)} className="px-10 h-12 font-black shadow-lg">LANJUT <ChevronRight className="ml-2" /></Button>}
